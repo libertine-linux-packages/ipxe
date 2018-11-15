@@ -2,6 +2,7 @@
 # Copyright © 2018 The developers of libertine linux's package ipxe. See the COPYRIGHT file in the top-level directory of this distribution and at https://raw.githubusercontent.com/libertine-linux-packages/ipxe/master/COPYRIGHT.
 
 
+variant=upstream
 
 depends build_busybox
 build_needs rm touch mkdir co echo printf true cat echo awk uname truncate
@@ -21,98 +22,115 @@ build_needs "$libertine_build"-cc "$libertine_build"-gcc "$libertine_build"-ld
 depends build_musl_cross_make_host
 build_needs "$libertine_host"-cc "$libertine_host"-gcc "$libertine_host"-ld "$libertine_host"-as "$libertine_host"-size "$libertine_host"-ar "$libertine_host"-ranlib "$libertine_host"-objcopy "$libertine_host"-nm "$libertine_host"-objdump
 
-_libertine_compile_ipxe_make_undionly()
-{
-	libertine_public_make bin/undionly.kpxe V=1 CROSS="$libertine_host"- CROSS_COMPILE="$libertine_host"- HOST_CC="$libertine_build"-cc HOST_CFLAGS="$(libertine_public_buildCCompilerFlags)" CC="$libertine_host"-cc CFLAGS="$(libertine_public_hostCCompilerFlags)" "$@"
-}
+depends build_ccache
+build_needs ccache
 
-_libertine_compile_ipxe_make_efi()
-{
-	local ipxe_efiArchitecture
+depends build_gnumake
+build_needs make
 
+depends build_libressl
+build_needs openssl
+
+build_needs mkdir sed cat
+libertine_compile_ipxe()
+{
+	if core_variable_isUnset ipxe_vlanTag; then
+		ipxe_vlanTag=''
+	fi
+
+	if core_variable_isUnset ipxe_vlanPriority; then
+		ipxe_vlanPriority='0'
+	fi
+	
+	if core_variable_isUnset ipxe_networkConfigurator; then
+		ipxe_networkConfigurator='ipv6'
+	fi
+	
+	if core_variable_isUnset ipxe_networkInterface; then
+		ipxe_networkInterface='net0'
+	fi
+	
+	if core_variable_isUnset ipxe_bootServer; then
+		ipxe_bootServer='192.16.0.1'
+	fi
+	
+	if core_variable_isUnset ipxe_signer; then
+		ipxe_signer='libertine-linux@stormmq.com'
+	fi
+	
+	local ipxe_efiArchitecture=''
 	case "$libertine_hostEfi" in
-		
+	
 		AA64)
 			ipxe_efiArchitecture='arm64'
 		;;
-		
+	
 		ARM)
 			ipxe_efiArchitecture='arm32'
 		;;
-		
+	
 		IA32)
 			ipxe_efiArchitecture='i386'
 		;;
-		
+	
 		X64)
 			ipxe_efiArchitecture='x86_64'
 		;;
-		
 	esac
 	
-	libertine_public_make bin-"$ipxe_efiArchitecture"-efi/ipxe.efi V=1 CROSS="$libertine_host"- CROSS_COMPILE="$libertine_host"- HOST_CC="$libertine_build"-cc HOST_CFLAGS="$(libertine_public_buildCCompilerFlags)" CC="$libertine_host"-cc CFLAGS="$(libertine_public_hostCCompilerFlags)" "$@"
+	local sourceConfiguratioFolderPath="$libertine_machinePackageConfigurationsFolderPath"/"$package"
+	
+	local configurationName='libertine'
+	
+	pushd "$(libertine_public_sourcePath)"/src
+		
+		mkdir -m 0755 -p config/local/libertine
+		
+		if [ -d "$sourceConfiguratioFolderPath" ]; then
+			libertine_public_copy "$sourceConfiguratioFolderPath"/. config/local/"$configurationName"
+		fi
+
+		sed -i -e 's,/bin/echo,echo,g' Makefile.housekeeping
+		
+		cat >"$(libertine_public_outputMiscPath)"/embed.ipxe <<-EOF
+			#!ipxe
+			
+			ifclose ${machine_networkingIpxeInterface}
+				set ${machine_networkingIpxeInterface}/mac ${machine_networkingMediaAccessControlAddress}
+				set ${machine_networkingIpxeInterface}/ip ${machine_networkingIpv4Address}
+				set ${machine_networkingIpxeInterface}/netmask ${machine_networkingIpv4Netmask}
+				set ${ipxe_networkInterface}/gateway ${machine_networkingIpv4Gateway}
+			ifopen ${machine_networkingIpxeInterface}
+
+			set hostname ${linux_machine}
+			set domain ${machine_networkingDomain}
+			set dns ${machine_networkingIpv4PrimaryDomainNameServer}
+			set syslogs ${machine_networkingSyslogServer}
+			
+			imgtrust --permanent
+			
+			kernel --name vmlinuz https://${machine_networkingIpxeBootServer}/machines/${libertine_machine}/libertine-linux.vmlinuz
+			
+			imgverify --signer ${ipxe_signer} libertine-linux.vmlinuz https://${machine_networkingIpxeBootServer}/machines/${libertine_machine}/libertine-linux.vmlinuz.sig
+			
+			boot vmlinuz
+		EOF
+
+		libertine_openssl_initializeCertificateAuthority
+		
+		libertine_openssl_perMachineKernelCodeSigningCertificate
+		
+		libertine_openssl_perMachineClientCertificate
+		
+		local clientAuthenticationFolderPath="$libertine_machinesFolderPath"/"$package"/client-authentication
+		local clientAuthenticationCertificateFilePath="$clientAuthenticationFolderPath"/client.certificate.pem
+		local clientAuthenticationKeyFilePath="$clientAuthenticationFolderPath"/client.key.pem
+		
+		libertine_public_make bin/undionly.kpxe V=1 CROSS="$libertine_host"- CROSS_COMPILE="$libertine_host"- HOST_CC="$libertine_build"-cc HOST_CFLAGS="$(libertine_public_buildCCompilerFlags)" CC="$libertine_host"-cc CFLAGS="$(libertine_public_hostCCompilerFlags)" LOCAL_CONFIG="$configurationName" EMBED=embed.ipxe CERT="$libertine_certificateAuthorityCertificateFilePath","$clientAuthenticationCertificateFilePath" TRUST="$libertine_certificateAuthorityCertificateFilePath" PRIVKEY="$clientAuthenticationKeyFilePath"
+		
+		if [ -n "$ipxe_efiArchitecture" ]; then
+			libertine_public_make bin-"$ipxe_efiArchitecture"-efi/ipxe.efi V=1 CROSS="$libertine_host"- CROSS_COMPILE="$libertine_host"- HOST_CC="$libertine_build"-cc HOST_CFLAGS="$(libertine_public_buildCCompilerFlags)" CC="$libertine_host"-cc CFLAGS="$(libertine_public_hostCCompilerFlags)" LOCAL_CONFIG="$configurationName" EMBED=embed.ipxe CERT="$libertine_certificateAuthorityCertificateFilePath","$clientAuthenticationCertificateFilePath" TRUST="$libertine_certificateAuthorityCertificateFilePath" PRIVKEY="$clientAuthenticationKeyFilePath"
+		fi
+		
+	popd
 }
-
-
-case "$package" in
-	
-	ipxe_prep)
-
-		variant=upstream
-
-		build_needs sed
-		libertine_compile_ipxe_prep()
-		{
-			sed -i -e 's,/bin/echo,echo,g' "$(libertine_public_sourcePath)"/src/Makefile.housekeeping
-			
-			pushd "$(libertine_public_sourcePath)"/src
-				
-				_libertine_compile_ipxe_make_undionly
-				
-				_libertine_compile_ipxe_make_efi
-				
-			popd
-			
-			rm -rf "$(libertine_public_outputMiscPath)"
-			ln -s copy/"$variant"/src "$(libertine_public_outputMiscPath)"
-		}
-		
-	;;
-	
-	ipxe)
-		
-		variant=empty
-
-		build_needs cp mkdir rm
-		libertine_compile_ipxe()
-		{
-			local ipxe_efiArchitecture
-			_libertine_compile_ipxe_efiArchitecture
-			
-			local inputPath="$(libertine_public_inputMakePath)"
-
-			mkdir -m 0755 -p "$inputPath"
-			libertine_public_copy "$(libertine_public_outputMiscPath ipxe_prep)"/. "$(libertine_public_inputMakePath)"/
-			
-			pushd "$(libertine_public_inputMakePath)"
-				
-				# Code Signing
-			 	#openssl req -newkey rsa -keyout codesign.key -out codesign.req
-			    #openssl ca -config ca.cnf -extensions codesigning -in codesign.req -out codesign.crt
-				#
-				#openssl cms -sign -binary -noattr -in libertine-linux.vmlinuz -signer codesign.crt -inkey codesign.key -certfile ca.crt -outform DER -out libertine-linux.vmlinuz.sig
-				
-				# Client Certificates
-				#openssl req -newkey rsa -keyout client.key -out client.req
-				#openssl ca -config ca.cnf -in client.req -out client.crt
-				
-				_libertine_compile_ipxe_make_undionly CERT=ca.crt,client.crt TRUST=ca.crt PRIVKEY=client.key
-				
-				_libertine_compile_ipxe_make_efi CERT=ca.crt,client.crt TRUST=ca.crt PRIVKEY=client.key
-				
-			popd
-		}
-		
-	;;
-	
-esac
